@@ -1,0 +1,1009 @@
+---
+title: "M448 Project"
+author: "Abby Lavoie"
+date: "2023-02-02"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(corrplot)
+library(olsrr)
+library(glmnet)
+library(leaps)
+library(timeDate)
+library(Hmisc)
+library(DMwR2)
+library(e1071)
+library("FSelector")
+library(BiocGenerics)
+library(MASS)
+library(class)
+library(ggplot2)
+library(randomForest)
+library(tree)
+library(klaR)
+library(gbm)
+library(ROCR)
+library(glmtoolbox)
+```
+
+```{r}
+#Load data set
+setwd("C:/Users/abbyl/Documents/Grad School/Spring 23/Math 448/Project")
+water <- read.csv("~/Grad School/Spring 23/Math 448/Project/water_potability.csv")
+```
+
+The dimensions and predictors:
+```{r}
+dim(water); names(water) ; attach(water)
+par(mfrow=c(3,3))
+hist(ph, col="hotpink")
+hist(Hardness, col = "red")
+hist(Solids, col="blue")
+hist(Chloramines, col="orange")
+hist(Sulfate, col="green")
+hist(Conductivity, col="purple")
+hist(Organic_carbon, col="coral")
+hist(Trihalomethanes, col="turquoise")
+hist(Turbidity, col="darkgreen")
+par(mfrow=c(1,1))
+histogram(water$Potability, freq=T, xlab="Potability")
+cor(water[,-10])
+ones.og = sum(Potability == 1)/nrow(water)
+zeroes.og = sum(Potability == 0)/nrow(water)
+#Q-Q plot:
+par(mfrow=c(2,2))
+qqnorm(water$Hardness, main="Q-Q Plot: Hardness"); qqline(water$Hardness)
+qqnorm(water$Solids, main="Q-Q Plot: Solids"); qqline(water$Solids)
+qqnorm(water$Trihalomethanes, main="Q-Q Plot: Trihalomethanes"); qqline(water$Trihalomethanes)
+par(mfrow=c(1,1))
+
+plot(water[,1:9]) #too many observations for this to be helpful
+
+#maybe boxplots would be more helpful
+boxplot(water[,1:9], col = c("red", "blue", "green", "orange", "purple", "brown", "turquoise", "hotpink", "orange4"))
+```
+
+Calculate mean, variance, range for the variables: 
+prior to standardizing for whole set, for omitting the observations with NAs, and for the imputed set. After this, then standardize. 
+```{r}
+summary(water) #need this calculation before standardizing
+water$Potability <- as.factor(water$Potability) #Change to factor from numeric
+summary(water$Potability)
+apply(water, 2, var,na.rm=T)
+```
+
+
+
+
+Check the correlations
+```{r}
+cor(water[,-10], use = "pairwise.complete.obs")
+corrplot(cor(water[,-10],use = "pairwise.complete.obs"))
+```
+
+
+
+Take care of NA's: Create 2nd dataset with only observations without missing values ("water.na") and another where the missing values have been imputed ("water.imp").
+
+```{r}
+sum(is.na(water))
+water.na <- na.omit(water) #dataset without missing values included
+dim(water.na)
+ones = sum(water.na$Potability == 1)/nrow(water.na)
+zeroes = sum(water.na$Potability == 0)/nrow(water.na)
+
+#impute missing values here:replace missing values with the mean of each column. 
+water.imp = water
+water.imp$ph[is.na(water.imp$ph)] <- mean(water.imp$ph, na.rm=TRUE)
+water.imp$Sulfate[is.na(water.imp$Sulfate)] <- mean(water.imp$Sulfate, na.rm=TRUE)
+water.imp$Trihalomethanes[is.na(water.imp$Trihalomethanes)] <- mean(water.imp$Trihalomethanes, na.rm=TRUE)
+sum(is.na(water.imp)) #all NA's have been replaced with column means. 
+```
+
+Calculate variance of the different data sets now:
+```{r}
+apply(water.imp[,1:9], 2, var)
+S.imp = cov(water.imp[,1:9])
+apply(water.na[,1:9], 2, var)
+S.na = cov(water.na[,1:9])
+```
+
+
+
+Need to standardize the variables so their scale is similar! Do this after creating 2 different sets. 
+```{r}
+water.imp[,1:9] <- scale(water.imp[,1:9], center=TRUE, scale=TRUE)
+water.na[,1:9] <- scale(water.na[,1:9], center=TRUE, scale=TRUE)
+summary(water.imp[,-10])
+summary(water.na[,-10])
+sum(water$Potability == 1)/nrow(water)
+boxplot(water.imp[,1:9], col = c("red", "blue", "green", "orange", "purple", "brown", "turquoise", "hotpink", "orange4"), main="Boxplots of Imputed Data Set")
+boxplot(water.na[,1:9], col = c("red", "blue", "green", "orange", "purple", "brown", "turquoise", "hotpink", "orange4"), main="Boxplots of Reduced Data Set")
+
+```
+
+Now to recheck the variances for the data sets:
+
+```{r}
+apply(water.na[,1:9], 2, var)
+s.std.na = cov(water.na[,1:9])
+apply(water.imp[,1:9], 2, var)
+s.std.imp = cov(water.imp[,1:9])
+```
+
+They are all 1 which is exactly what I'd expect. 
+
+
+Correlation plots for the 2 datasets:
+Check correlation of variables again with omitted and with imputed to check
+```{r}
+cors.na <- cor(water.na[,1:9])
+corrplot(cors.na)
+cors.imp <- cor(water.imp[,1:9])
+corrplot(cors.imp)
+```
+
+Definitely no strong pairwise relationships. 
+
+
+
+# Split into Test/Train
+
+Retain 80% of data set for training, use 20% for testing
+
+```{r}
+#split water.na and water.imp
+set.seed(448)
+tr <- sample(1:nrow(water.na), 0.8*nrow(water.na))
+na.train <- water.na[tr,]
+na.test <- water.na[-tr,]
+
+train <- sample(1:nrow(water.imp), 0.8*nrow(water.imp))
+imp.train <- water.imp[train,]
+imp.test <- water.imp[-train,]
+
+print("The number of 0's and 1's in the NA-omitted training data"); summary(na.train$Potability)
+print("The number of 0's and 1's in the NA-imputed training data"); summary(imp.train$Potability)
+print("The proportion of 1's in the Na-omitted training data");sum(na.train$Potability == 1)/nrow(na.train)
+print("The proportion of 1's in the Na-omitted test data");sum(na.test$Potability == 1)/nrow(na.test)
+print("The proportion of 1's in the Na-imputed training data");sum(imp.train$Potability == 1)/nrow(imp.train)
+print("The proportion of 1's in the Na-imputed test data");sum(imp.test$Potability == 1)/nrow(imp.test)
+```
+
+Proportions of outcome are retained (very similar) between imputed and omitted, as well as training and test data for each data set. There are of course more overall values in the imputed data set as I didn't delete a thousand observations in this data set. 
+
+ 
+---> can I check variance inflation factor of models?
+---> use AIC, R^2 - compare models chosen and find best overall and best 2-factor for interpretability
+
+
+Feature selection methods:Using different methods of feature selection, I will compare the features chosen using metrics like AIC and adjusted R^2. (Not using train/test sets, only on full data!) Are any of the variables picked by all methods? 
+
+Do I need to change the outcome variable to numeric for this to work? YES, if I want to use olsrr package then the outcome must be numeric. Here I can only use lm model. 
+
+For glmtoolbox, it can stay as a factor. I can use glm model here. 
+```{r}
+#For glm model: glmtoolbox
+
+fit.na = glm(Potability~ph+Hardness+Solids+Chloramines+Sulfate+Conductivity+Organic_carbon+Trihalomethanes+Turbidity, data=water.na, family="binomial")
+fit.imp = glm(Potability~ph+Hardness+Solids+Chloramines+Sulfate+Conductivity+Organic_carbon+Trihalomethanes+Turbidity, data=water.imp, family="binomial")
+summary(fit.na); summary(fit.imp)
+
+stepCriterion(fit.na, criterion = "p-value", direction = "forward", levels = c(0.10,0.10))
+stepCriterion(fit.na, criterion = "p-value",direction = "backward", levels = c(0.10,0.10))
+stepCriterion(fit.imp,  criterion = "p-value", direction = "forward", levels = c(0.10,0.10))
+stepCriterion(fit.imp, criterion = "p-value", direction = "backward", levels = c(0.10,0.10))
+
+
+###LOOK UP THE THRESHOLD VALUES!
+#for lm, must have numeric outcome. 
+##Wrapper Methods
+mod.na <- lm(as.numeric(Potability)~ph+Hardness+Solids+Chloramines+Sulfate+Conductivity+Organic_carbon+Trihalomethanes+Turbidity, data=water.na)
+mod.imp <- lm(as.numeric(Potability)~ph+Hardness+Solids+Chloramines+Sulfate+Conductivity+Organic_carbon+Trihalomethanes+Turbidity, data=water.imp)
+summary(mod.na); summary(mod.imp)
+
+#forward
+ols_step_forward_p(mod.na, penter=0.10)
+ols_step_forward_p(mod.imp, 0.1)
+
+#backward
+ols_step_backward_p(mod.na, prem=0.1)
+ols_step_backward_p(mod.imp, prem=0.1)
+
+#stepwise/both
+ols_step_both_p(mod.na,penter=0.3, prem=0.3)
+ols_step_both_p(mod.imp, penter=0.3, prem=0.3)
+
+#all possible/best
+k<-ols_step_all_possible(mod.na)
+which.max(k$adjr)
+k$predictors[10]
+l <- ols_step_all_possible(mod.imp)
+which.max(l$adjr)
+l$predictors[46]
+
+#DO THESE RESULTS MATCH regsubsets?
+b.na <- regsubsets(water.na[,1:9], water.na[,10], nvmax=9, method="backward")
+f.na <- regsubsets(water.na[,1:9], water.na[,10], nvmax=9, method="forward")
+s.na <- regsubsets(water.na[,1:9], water.na[,10], nvmax=9, method="seqrep")
+e.na <- regsubsets(water.na[,1:9], water.na[,10], nvmax=9, method="exhaustive")
+
+summary(b.na)
+plot(summary(b.na)$adjr2) #insert title and axes labels
+which.max(summary(b.na)$adjr2)
+
+summary(f.na)
+plot(summary(f.na)$adjr2)
+which.max(summary(f.na)$adjr2)
+
+summary(s.na)
+plot(summary(s.na)$adjr2)
+which.max(summary(s.na)$adjr2)
+
+summary(e.na)
+plot(summary(e.na)$adjr2)
+which.max(summary(e.na)$adjr2)
+
+b.imp <- regsubsets(water.imp[,1:9], water.imp[,10], nvmax=9, method="backward")
+f.imp <- regsubsets(water.imp[,1:9], water.imp[,10], nvmax=9, method="forward")
+s.imp <- regsubsets(water.imp[,1:9], water.imp[,10], nvmax=9, method="seqrep")
+e.imp <- regsubsets(water.imp[,1:9], water.imp[,10], nvmax=9, method="exhaustive")
+
+summary(b.imp)
+plot(summary(b.imp)$adjr2) #insert title and axes labels
+which.max(summary(b.imp)$adjr2)
+
+summary(f.imp)
+plot(summary(f.imp)$adjr2) #insert title and axes labels
+which.max(summary(f.imp)$adjr2)
+
+summary(s.imp)
+plot(summary(s.imp)$adjr2) #insert title and axes labels
+which.max(summary(s.imp)$adjr2)
+
+summary(e.imp)
+plot(summary(e.imp)$adjr2) #insert title and axes labels
+which.max(summary(e.imp)$adjr2)
+
+```
+
+
+```{r}
+
+##Embedded Methods: LASSO, RIDGE, ELASTIC NET - I can use these for classification!
+#will need to separate the outcome from the matrix of predictors for both test and train sets. 
+#For ridge, lasso and in-between=elastic net (mess with alpha), grid=10^seq(10,-2,length=100) #grid of lambda (parameter to tweak)
+#alpha=0 then a ridge regression model is fit
+#alpha=1 then a lasso model is fit. ridge.mod=glmnet(x,y,alpha=0,lambda=grid) 
+#val.errors <- rep(NA,19)
+#for(i in 1:19){
+  #coefi <- coef(regfit.best,id=i)
+  #pred <- test.mat[,names(coefi)]%*%coefi
+  #val.errors[i] <- mean((Hitters$Salary[test]-pred)^2)
+#}
+#val.errors
+#which.min(val.errors)
+set.seed(448)
+x.natrain <- as.matrix(na.train[,1:9])
+y.natrain <- na.train[,10]
+x.natest <- as.matrix(na.test[,1:9])
+y.natest <- na.test[,10]
+
+x.imptrain <- as.matrix(imp.train[,1:9])
+y.imptrain <- imp.train[,10]
+x.imptest <- as.matrix(imp.test[,1:9])
+y.imptest <- imp.test[,10]
+
+grid=10^seq(10,-5,length=100)
+#alpha=0 Ridge penalty
+#default threshold value is 1E-7
+out.na = glmnet(x.natrain,y.natrain,alpha=0, lambda=grid, family="binomial", thresh=1e-12)
+cv.outna=cv.glmnet(x.natrain,y.natrain,alpha=0, lambda=grid, family="binomial", thresh=1e-12)
+plot(cv.outna)#CV error plot
+bestlam.na=cv.outna$lambda.min 
+ridge.namod=glmnet(x.natrain,y.natrain,alpha=0,lambda=bestlam.na, family="binomial")
+ridge.predna=predict(ridge.namod,s=bestlam.na,newx=x.natest)
+mean((ridge.predna != y.natest)^2)  
+
+out.imp = glmnet(x.imptrain,y.imptrain,alpha=0, lambda=grid, family="binomial", thresh=1e-12)
+cv.outimp=cv.glmnet(x.imptrain,y.imptrain,alpha=0, lambda=grid, family="binomial", thresh=1e-12)
+plot(cv.outimp)#CV error plot
+bestlam.imp=cv.outimp$lambda.min 
+ridge.impmod=glmnet(x.imptrain,y.imptrain,alpha=0,lambda=bestlam.imp, family="binomial")
+ridge.predimp=predict(ridge.impmod,s=bestlam.imp,newx=x.imptest, type="coefficients")
+coef(ridge.namod)
+coef(ridge.impmod)
+plot(out.na, label=T)
+plot(out.imp, label=T, xlim=c(0,0.000001), ylim=c(-.0000002, .0000002))
+plot(out.imp, label=T)
+
+plot(ridge.impmod, label=T)
+plot(ridge.namod, label=T)
+
+#alpha=1 LASSO penalty
+lass.namod=glmnet(x.natrain,y.natrain,alpha=1,lambda=grid, family="binomial")
+lass.impmod=glmnet(x.imptrain,y.imptrain,alpha=1,lambda=grid, family="binomial")
+plot(lass.namod, label=T)
+plot(lass.impmod, label=T)
+
+lass.nacv = cv.glmnet(x.natrain,y.natrain,alpha=1,lambda=grid, family="binomial")
+lass.impcv = cv.glmnet(x.imptrain,y.imptrain,alpha=1,lambda=grid, family="binomial")
+na.bestlam=lass.nacv$lambda.min
+imp.bestlam=lass.impcv$lambda.min
+lasso.nacoef=predict(lass.namod,type="coefficients",s=na.bestlam)
+lasso.impcoef=predict(lass.impmod,type="coefficients",s=imp.bestlam)
+lasso.nacoef[lasso.nacoef != 0]
+lasso.impcoef[lasso.impcoef != 0]
+plot(lasso.nacoef)
+
+##NOT FINISHED WITH THIS
+#alpha <1 and >0 Elastic Net
+al = seq(0.1,0.9, by=0.05)
+ridge.namod=glmnet(x.natrain,y.natrain,alpha=al,lambda=grid, family="binomial")
+ridge.impmod=glmnet(x.imptrain,y.imptrain,alpha=al,lambda=grid, family="binomial")
+
+```
+
+
+
+Using Solids & Chloramines for the omitted data set and Solids & Organic Carbon for the imputed data set. 
+
+```{r}
+plot(water.imp$Solids, water.imp$Organic_carbon, col=as.factor(water.imp$Potability), xlab="Solids", ylab="Organic Carbon", main="Potability (Imputed)")
+legend("topright", legend=c("Potable", "Non-Potable"), col=c("red", "black"), pch=1)
+plot(water.imp$Solids, water.imp$Chloramines, col=as.factor(water.imp$Potability), xlab="Solids", ylab="Chloramines", main="Potability (Imputed)")
+legend("topright", legend=c("Potable", "Non-Potable"), col=c("red", "black"), pch=1)
+plot(water.na$Solids, water.na$Chloramines, col=as.factor(water.imp$Potability), xlab="Solids", ylab="Chloramines", main="Potability (Omitted)")
+legend("topright", legend=c("Potable", "Non-Potable"), col=c("red", "black"), pch=1)
+
+plot(water$Solids, water$Chloramines, col=water$Potability,xlab="Solids", ylab="Chloramines", main="Potability")
+legend("topright", legend=c("Potable", "Not Potable"), col=c("red", "black"), pch=1)
+plot(water$Solids, water$Organic_carbon, col=water$Potability,xlab="Solids", ylab="Organic Carbon", main="Potability")
+legend("topright", legend=c("Potable", "Not Potable"), col=c("red", "black"), pch=1)
+
+
+plot(water.imp$Sulfate, water.imp$Hardness, col=as.factor(water.imp$Potability), xlab="Sulfate", ylab="Hardness", main="Potability (Imputed)")
+legend("bottomleft", legend=c("Potable", "Non-Potable"), col=c("red", "black"), pch=1)
+plot(water.imp$Hardness, water.imp$ph, col=as.factor(water.imp$Potability), xlab="Hardness", ylab="pH", main="Potability (Imputed)")
+legend("bottomleft", legend=c("Potable", "Non-Potable"), col=c("red", "black"), pch=1)
+plot(water.na$Sulfate, water.na$ph, col=as.factor(water.imp$Potability), xlab="Sulfate", ylab="pH", main="Potability (Omitted)")
+legend("bottomleft", legend=c("Potable", "Non-Potable"), col=c("red", "black"), pch=1)
+```
+
+
+Prediction: I will apply logistic regression, LDA, K-Nearest Neighbors, Tree techniques, and Support Vector Machine to the classification model building. 
+
+
+Now Fit classification models:
+1. Linear Regression - try polynomial regression fit?
+```{r}
+
+glm.impid = glm(Potability~Solids+Organic_carbon, data=imp.train, family=binomial(link="identity"))
+pred.glmimp = predict(glm.impid, imp.test)
+val.imp = ifelse(pred.glmimp<0.5, 1, 0) 
+mean(val.imp != y.imptest)#0.6356707
+summary(glm.imp)
+#refit
+glm.impre = glm(Potability~Organic_carbon, data=imp.train, family=binomial(link="identity"))
+pred.impre = predict(glm.impre, imp.test)
+val.impre = ifelse(pred.impre<0.5, 1, 0) 
+mean(val.impre != y.imptest)#0.6356707
+summary(glm.impre)
+
+imp.allglm = glm(Potability~., data=imp.train, family=binomial(link="identity"))
+pred.allimp = predict(imp.allglm, imp.test)
+values.allimp = ifelse(pred.glmimp<0.5, 1, 0)
+mean(values.allimp != y.imptest)#0.6356707
+
+glm.naid = glm(Potability~Solids+Chloramines, data=na.train, family=binomial(link="identity"))
+pred.glmna = predict(glm.naid, na.test)
+val.na = ifelse(pred.glmna<0.5, 1, 0) 
+mean(val.na != y.natest)#0.5955335
+summary(glm.na)
+
+na.allglm = glm(Potability~., data=na.train, family=binomial(link="identity"))
+pred.allna = predict(na.allglm, na.test)
+values.allna = ifelse(pred.allna<0.5, 1, 0)
+mean(values.allna != y.natest)#0.5930521
+summary(na.allglm)
+
+##WRONG TO DO LINEAR REGRESSION FOR THIS: SHOULD DO glm, binomial(link="identity")
+#imputed
+lm.imp <- lm(as.numeric(Potability)~Solids+Organic_carbon, data=imp.train)
+summary(lm.imp)
+pred.imptr <- predict(lm.imp, imp.train)
+pred.imptr <- ifelse(pred.imptr<0.5, 0, 1) #is this the correct order of
+lm.tr.imp <- table(pred.imptr, imp.train$Potability) #predicts everything as "1"
+trerr.lmimp <-lm.tr.imp[1,1]/sum(lm.tr.imp[1,1], lm.tr.imp[1,2])
+pred.impte <- predict(lm.imp, imp.test)
+pred.impte <- ifelse(pred.impte<0.5, 0, 1)
+lm.te.imp <- table(pred.impte, imp.test$Potability)
+err.lmimp = lm.te.imp[1,1]/sum(lm.te.imp[1,1], lm.te.imp[1,2])
+
+plot(imp.train$Solids, imp.train$Organic_carbon, main="Linear Decision Boundary - Imputed Set", ylab="Organic Carbon", xlab="Solids", col=imp.train$Potability, ylim=c(-5,50), xlim=c(-5,20))
+abline(a=46.32851, b= 0.527376, col="purple")
+
+#omitted
+lm.na <- lm(as.numeric(Potability)~Solids+Chloramines, data=na.train)
+summary(lm.na)
+pred.natr <- predict(lm.na, na.train)
+pred.natr <- ifelse(pred.natr<0.5, 0, 1) #is this the correct order of
+lm.tr.na <- table(pred.natr, na.train$Potability) #predicts everything as "1"
+trerr.lmna <- lm.tr.na[1,1]/sum(lm.tr.na[1,1], lm.tr.na[1,2])
+pred.nate <- predict(lm.na, na.test)
+pred.nate <- ifelse(pred.nate<0.5, 0, 1)
+lm.te.na <- table(pred.nate, na.test$Potability)
+err.lmna = lm.te.na[1,1]/sum(lm.te.na[1,1], lm.te.na[1,2])
+
+plot(na.train$Solids, na.train$Chloramines, col=na.train$Potability)
+abline(a=-59.63168, b=-1.229703, col="purple")
+
+```
+
+
+2. Log Regression 
+```{r}
+#Train model
+glm.imp = glm(Potability~ Solids+Organic_carbon, data=imp.train, family="binomial")
+summary(glm.imp)
+glm.imp2 = glm(Potability~ Solids+Organic_carbon+Chloramines, data=imp.train, family="binomial")
+summary(glm.imp2) #no improvement
+glmimp.probs <- predict(glm.imp, type="response")
+glmimp.pred <- rep(0,length(imp.train$Potability))
+glmimp.pred[glmimp.probs>0.5]=1
+glmimp.trtab <- table(glmimp.pred, imp.train$Potability)
+train.err.imp <- mean(glmimp.pred != imp.train$Potability)
+glmimp.probste <- predict(glm.imp, imp.test, type="response")
+glm.imptepred <- rep(0, length(imp.test$Potability))
+glm.imptepred[glmimp.probste>0.5]=1
+glmimp.tetab <- table(glm.imptepred, imp.test$Potability)
+test.err.imp <- mean(glm.imptepred != imp.test$Potability)
+
+#Train model
+glm.na = glm(Potability~Solids+Chloramines, data=na.train, family="binomial")
+summary(glm.na)
+glmna.probs <- predict(glm.na, type="response")
+glmna.pred <- rep(0,length(na.train$Potability))
+glmna.pred[glmna.probs>0.5]=1
+glmna.trtab <- table(glmna.pred, na.train$Potability)
+train.err.na <- mean(glmna.pred != na.train$Potability)
+glmna.probste <- predict(glm.na, na.test, type="response")
+glm.natepred <- rep(0, length(na.test$Potability))
+glm.natepred[glmna.probste>0.5]=1
+glmna.tetab <- table(glm.natepred, na.test$Potability)
+test.err.na <- mean(glm.natepred != na.test$Potability)
+```
+
+
+
+3. LDA
+```{r}
+#omitted
+lda.fitna <- lda(Potability~Solids+Chloramines, na.train)
+ldatrain.napred <- predict(lda.fitna, na.train)
+ldatrain.napredqual  <- ldatrain.napred$class
+lda.tr.natab <- table(ldatrain.napredqual, na.train$Potability)
+lda.te.napred <- predict(lda.fitna, na.test)
+ldatest.napredqual <- lda.te.napred$class
+lda.te.natab <- table(ldatest.napredqual, na.test$Potability)
+ldana.trerr <- lda.tr.natab[1,2]/sum(lda.tr.natab[1,])
+ldana.teerr <- lda.te.natab[1,2]/sum(lda.te.natab[1,])
+lda.fitna
+
+#imputed
+lda.fitimp <- lda(Potability~Solids+Organic_carbon, imp.train)
+ldatrain.imppred <- predict(lda.fitimp, imp.train)
+ldatrain.imppredqual  <- ldatrain.imppred$class
+lda.tr.imptab <- table(ldatrain.imppredqual, imp.train$Potability)
+lda.te.imppred <- predict(lda.fitimp, imp.test)
+ldatest.imppredqual <- lda.te.imppred$class
+lda.te.imptab <- table(ldatest.imppredqual, imp.test$Potability)
+ldaimp.trerr <- lda.tr.imptab[1,2]/sum(lda.tr.imptab[1,])
+ldaimp.teerr <- lda.te.imptab[1,2]/sum(lda.te.imptab[1,])
+lda.fitimp
+```
+
+
+4. KNN
+```{r}
+set.seed(448)
+#x.natrain, y.natrain, x.natest,y.natest
+#x.imptrain,y.imptrain, x.imptest,y.imptest
+
+#Find value of k:
+
+##omitted
+k.na <- seq(from=1, to=500, by=2)
+knntest.errs.na <- numeric(length(k.na))
+knntr.errs.na <- numeric(length(k.na))
+for(i in 1:length(k.na)){
+  knn.pred <- knn(x.natrain, x.natest, y.natrain, k=i)
+  knntest.errs.na[i] <- mean(knn.pred != y.natest)
+  knn.predtr <- knn(x.natrain, x.natrain, y.natrain, k=i)
+  knntr.errs.na[i] <- mean(knn.predtr != y.natrain)
+}
+plot(k.na, knntest.errs.na, main="Test Error For KNN (omitted dataset)", xlab="Values of K", ylab="Test Error")
+abline(h=0.3424318)
+
+k.na[which.min(knntest.errs.na)] #k=25 is minimum
+knntest.errs.na[which.min(knntest.errs.na)]
+knntr.errs.na[which.min(knntest.errs.na)]
+
+min(knntest.errs.na)
+which.min(knntest.errs.na) #index 13, 39, 44, 48 have lowest test error of 0.3424318
+k.na[13]; k.na[39]; k.na[44]; k.na[48] #25, 77, 87, 95
+#Can I put test and training errors on same graph? ## ADD LEGEND!
+plot(k.na, knntest.errs.na, type="l", main="Test Error  vs. Training Error For KNN (omitted dataset)", xlab="Values of K", ylab="Error", col="black", ylim=c(0, 0.46), lty=1)
+lines(k.na,knntr.errs.na, col="red", lty=2)
+abline(h=0.3424318, col="blue", lty=4)
+legend(300,0.15, legend=c("Test Error", "Training Error", "Minimum Test Error"), lty=c(1,2,4) ,col=c("black", "blue", "darkred"))
+
+#how to find all values of k.na for which test error is minimum value? 
+plot(k.na[1:50], knntest.errs.na[1:50])
+
+k.na1[which.min(knntest.errs.na1)] #13 is the minimum here
+knntest.errs.na1[which.min(knntest.errs.na1)]
+
+
+##imputed
+k.imp <- seq(from=1, to=500, by=2)
+knntest.errs.imp <- numeric(length(k.imp))
+knntr.errs.imp <- numeric(length(k.imp))
+for(i in 1:(length(k.imp))){
+  knn.pred <- knn(x.imptrain, x.imptest, y.imptrain, k=i)
+  knntest.errs.imp[i] <- mean(knn.pred != y.imptest)
+  knn.predtr <- knn(x.imptrain, x.imptrain, y.imptrain, k=i)
+  knntr.errs.imp[i] <- mean(knn.predtr != y.imptrain)
+}
+plot(k.na, knntest.errs.imp, main="Test Error For KNN (imputed dataset)", xlab="Values of K", ylab="Test Error")
+abline(h=0.3185976)
+
+min(knntest.errs.imp)
+which.min(knntest.errs.imp) #index 13, 39, 44, 48 have lowest test error of 0.3185976
+k.na[34] #67 
+plot(k.na, knntest.errs.imp, type="l",main="Test Error vs. Training Error For KNN (imputed dataset)", xlab="Values of K", ylab="Error", col="black", lty=1, ylim=c(0, 0.42))
+lines(k.imp,knntr.errs.imp, col="purple", lty=2)
+abline(h=0.3185976, col="hotpink", lty=4)
+legend(300,0.15, legend=c("Test Error", "Training Error", "Minimum Test Error"), lty=c(1,2,4), col=c("black", "purple", "hotpink"))
+
+min(knntest.errs.imp)
+k.imp[which.min(knntest.errs.imp)] #k=67 s minimum
+knntr.errs.imp[which.min(knntest.errs.imp)]
+```
+
+
+5. TREES - classification, RF, boosting/bagging?
+Uses all the predictors.
+
+```{r}
+set.seed(448)
+#classification Tree First
+na.tree = tree(Potability~., na.train, split="gini")
+summary(na.tree)
+plot(na.tree)
+text(na.tree,  pretty=0)
+
+imp.tree = tree(Potability~., imp.train, split="gini")
+summary(imp.tree)
+plot(imp.tree)
+text(imp.tree, pretty=0)
+#prediction, test error
+na.predtree = predict(na.tree, na.test, type="class")
+table(na.predtree, y.natest)
+(81+85)/(81+85+155+82) #0.4119107
+
+imp.predtree = predict(imp.tree, imp.test, type="class")
+table(imp.predtree, y.imptest)
+(113+134)/(113+134+283+126) #0.3765244
+#Can I improve this error by pruning?
+#prune using CV
+cv.natree = cv.tree(na.tree, FUN=prune.misclass)
+summary(cv.natree)
+par(mfrow=c(1,2))
+plot(cv.natree$size, cv.natree$dev, type="b", xlab="Numer of Terminal Nodes", ylab="CV Errors", main="Error Rate vs Tree Size")
+plot(cv.natree$k, cv.natree$dev, type="b", xlab="Cost-Complexity Parameter", ylab="CV Errors", main="Error Rate vs Cost-Complexity")
+par(mfrow=c(1,1))
+min(cv.natree$dev); cv.natree$size[which.min(cv.natree$dev)] #same error for trees size 185-4
+#prune tree
+#Using size 185
+na.prunetree = prune.misclass(na.tree, best=cv.natree$size[which.min(cv.natree$dev)]) 
+plot(na.prunetree)
+text(na.prunetree, pretty=0)
+summary(na.prunetree)
+naprune.pred= predict(na.prunetree, na.test, type="class")
+table(naprune.pred, y.natest)
+(81+84)/(156+81+84+82) #0.4094293 some improvement
+#Using size 4
+na.prunetree2 = prune.misclass(na.tree, best=4)
+plot(na.prunetree2) #VERY Easy to interpret
+text(na.prunetree2, pretty=0)
+summary(na.prunetree2)
+naprune.pred2= predict(na.prunetree2, na.test, type="class")
+table(naprune.pred2, y.natest)
+(132+13)/(237+31+132+13) #0.3510896 much improved
+
+#NEED TO GET IMPUTED TREE TO WORK... OR Use CV results for NA data?
+cv.imptree = cv.tree(imp.tree, FUN=prune.misclass) #won't prune. 
+summary(cv.imptree)
+par(mfrow=c(1,2))
+plot(cv.imptree$size, cv.imptree$dev, type="b", xlab="Numer of Terminal Nodes", ylab="CV Errors", main="Error Rate vs Tree Size")
+plot(cv.imptree$k, cv.imptree$dev, type="b", xlab="Cost-Complexity Parameter", ylab="CV Errors", main="Error Rate vs Cost-Complexity")
+par(mfrow=c(1,1))
+
+#using NA results from CV
+imp.prunetree = prune.misclass(imp.tree, best=185)
+plot(imp.prunetree)
+text(imp.prunetree, pretty=0)
+summary(imp.prunetree)
+imp.prunepred = predict(imp.prunetree, imp.test, type="class")
+table(imp.prunepred, y.imptest)
+(108+141)/(276+108+141+131) #0.3795732
+
+imp.prunetree2 = prune.misclass(imp.tree, best=4)
+plot(imp.prunetree2)
+text(imp.prunetree2, pretty=0)
+summary(imp.prunetree2)
+imp.prunepred2 = predict(imp.prunetree2, imp.test, type="class")
+table(imp.prunepred2, y.imptest)
+(205+16)/(401+205+16+34) #0.3368902 improvement
+
+#This is a sequence of values for pruning. Works for both datasets!
+best_seq <- seq(from=2, to=150, by=2)
+treena.err <- numeric(length(best_seq))
+treeimp.err <- numeric(length(best_seq))
+for(i in 1:length(best_seq)){
+  prune.na <- prune.misclass(na.tree, best=best_seq[i])
+  prunena.pred <- predict(prune.na, na.test, type="class")
+  treena.err[i] <- mean(prunena.pred != y.natest)
+  prune.imp <- prune.misclass(imp.tree, best=best_seq[i])
+  pruneimp.pred <- predict(prune.imp, imp.test, type="class")
+  treeimp.err[i] <- mean(pruneimp.pred != y.imptest)
+}
+plot(best_seq, treena.err, main="Pruned Classification Trees (NA set)", xlab="Number of Terminal Nodes", ylab="Test Classification Error",type="b")
+plot(best_seq, treeimp.err, main="Pruned Classification Trees (IMP set)", xlab="Number of Terminal Nodes", ylab="Test Classification Error",type="b")
+
+#minimum error k-values
+min(treena.err); which.min(treena.err) #minimum at 7, # 0.337469
+min(treeimp.err); which.min(treeimp.err) #minimum at 5 0.3353659
+
+#prune trees accordingly to get plots
+na.prunetree3 = prune.misclass(na.tree, best=7)
+plot(na.prunetree3)
+text(na.prunetree3, pretty=0)
+summary(na.prunetree3)
+
+imp.prunetree3 = prune.misclass(imp.tree, best=5)
+plot(imp.prunetree3)
+text(imp.prunetree3, pretty=0)
+summary(imp.prunetree3)
+```
+
+The minimum error rate achieved with cross-validation pruning for water.na is 624 for a tree size with 185 terminal nodes all the way to 4 nodes. CV pruning was not applicable to the water.imp dataset as it kept honing down to 1 node and throwing an error. 
+For both data sets, 185 nodes as well as 4 nodes was chosen to prune the trees. The 4-node trees were quite easy to interpret and understand. The error rates for 4 nodes were the lowest for both data sets. The important variables for the 4 node trees were sulfate and ph. 
+For the 185 node trees, the na and imp datasets - sulfate, solids, and ph were most important. 
+By testing a sequence of sizes, I determined that a size of 7nodes for na and 5nodes for imp would minimize the test error. 
+
+
+Next Bagging, then boosting, then randomforest
+
+```{r}
+#BAGGING
+
+na.bag = randomForest(Potability~., na.train, mtry=dim(x.natrain)[2], importance=T)
+na.bag
+na.yhatbag = predict(na.bag, na.test, type="class")
+sum(na.yhatbag != y.natest) #124 errors
+mean(na.yhatbag != y.natest)
+table(na.yhatbag, y.natest) #0.3076923
+importance(na.bag)
+varImpPlot(na.bag)
+
+#could I plot the tree results on a plot of outcomes for a scatterplot of the 2 topmost important variables?
+
+imp.bag = randomForest(Potability~., imp.train, mtry=dim(x.imptrain)[2], importance=T)
+imp.bag
+imp.yhatbag = predict(imp.bag, imp.test, type="class")
+sum(imp.yhatbag != y.imptest) 198
+mean(imp.yhatbag != y.imptest)
+table(imp.yhatbag, y.imptest) #0.3018293
+varImpPlot(imp.bag)
+
+#RF m=p, p-1
+trees <- seq(from=2, to=500, by=1)
+bagna.testerr = rep(NA, length(trees))
+bagimp.testerr = rep(NA, length(trees))
+rfna.testerr = rep(NA, length(trees))
+rfimp.testerr = rep(NA, length(trees))
+for(i in 1: length(trees)){
+  bagna.p <- randomForest(x.natrain, y = y.natrain, xtest = x.natest, ytest = y.natest, mtry = ncol(x.natrain), ntree = trees[i])
+  bagimp.p <- randomForest(x.imptrain, y = y.imptrain, xtest = x.imptest, ytest = y.imptest, mtry = ncol(x.imptrain), ntree = trees[i])
+  bagna.testerr[i] = mean(bagna.p$test$err.rate)
+  bagimp.testerr[i] = mean(bagimp.p$test$err.rate)
+  rfna.p <- randomForest(x.natrain, y = y.natrain, xtest = x.natest, ytest = y.natest, mtry = ncol(x.natrain) - 1, ntree = trees[i])
+  rfimp.p <- randomForest(x.imptrain, y = y.imptrain, xtest = x.imptest, ytest = y.imptest, mtry = ncol(x.imptrain) - 1, ntree = trees[i])
+  rfna.testerr[i] <- mean(rfna.p$test$err.rate)
+  rfimp.testerr[i] <- mean(rfimp.p$test$err.rate)
+}
+plot(trees, rfna.testerr, type="l", xlab="Tree Size", ylab="Error", main="RF (m=p-1) Tree Size vs. Error (NA set)")
+plot(trees,rfimp.testerr, type="l", xlab="Tree Size", ylab="Error", main="RF (m=p-1) Tree Size vs. Error (IMP set)")
+
+#RANDOM FOREST
+
+#Rf m=p/3, sqrt(p)
+rf2na.testerr = rep(NA, length(trees))
+rf2imp.testerr = rep(NA, length(trees))
+rf3na.testerr = rep(NA, length(trees))
+rf3imp.testerr = rep(NA, length(trees))
+for(i in 1:length(trees)){
+  rfna.p2 <- randomForest(x.natrain, y = y.natrain, xtest = x.natest, ytest = y.natest, mtry = ncol(x.natrain)/3, ntree = trees[i])
+  rfimp.p2 <- randomForest(x.imptrain, y = y.imptrain, xtest = x.imptest, ytest = y.imptest, mtry = ncol(x.imptrain)/3, ntree = trees[i])
+  rf2na.testerr[i] = mean(rfna.p2$test$err.rate)
+  rf2imp.testerr[i] = mean(rfimp.p2$test$err.rate)
+   rfna.p3 <- randomForest(x.natrain, y = y.natrain, xtest = x.natest, ytest = y.natest, mtry = sqrt(ncol(x.natrain)), ntree = trees[i])
+  rfimp.p3 <- randomForest(x.imptrain, y = y.imptrain, xtest = x.imptest, ytest = y.imptest, mtry = sqrt(ncol(x.imptrain)), ntree = trees[i])
+  rf3na.testerr[i] = mean(rfna.p3$test$err.rate)
+  rf3imp.testerr[i] = mean(rfimp.p3$test$err.rate)
+}
+
+
+plot(trees,bagna.testerr, col = "green", type = "l", xlab = "Number of Trees", ylab = "Test Classification Error", main = "Random Forest Classification Error: Water Potability (NA)", ylim=c(0.32, 0.47) )
+lines(trees,rfna.testerr, col="orange", type="l" ) #p-1
+lines(trees, rf2na.testerr, col = "red", type = "l")
+lines(trees, rf3na.testerr, col = "blue", type = "l")
+legend("topright", c("m = p (bagging)", "m=p-1", "m = p/3", "m = sqrt(p)"), col = c("green", "orange", "red", "blue"), cex =1, lty = 1)
+
+plot(trees,bagimp.testerr, col = "green", type = "l", xlab = "Number of Trees", ylab = "Test Classification Error", main = "Random Forest Classification Error: Water Potability (IMP)", ylim=c(0.33, 0.46) )
+lines(trees, rfimp.testerr, col="orange", type="l")
+lines(trees, rf2imp.testerr, col = "red", type = "l")
+lines(trees, rf3imp.testerr, col = "blue", type = "l")
+legend("topright", c("m = p (bagging)","m=p-1", "m = p/3", "m = sqrt(p)"), col = c("green", "orange","red", "blue"), cex =1, lty = 1)
+
+
+#lowest error:
+min(bagna.testerr);which.min(bagna.testerr) ;min(rfna.testerr); which.min(rfna.testerr); trees[which.min(rfna.testerr)]
+min(rf2na.testerr); which.min(rf2na.testerr); trees[which.min(rf2na.testerr)]
+min(rf3na.testerr); which.min(rf3na.testerr); trees[which.min(rf3na.testerr)]
+varImpPlot(na.bag);varImpPlot(rfna.p); varImpPlot(rfna.p2);varImpPlot(rfna.p3)
+
+
+min(bagimp.testerr); which.min(bagimp.testerr);min(rfimp.testerr); which.min(rfimp.testerr); trees[which.min(rfimp.testerr)]
+min(rf2imp.testerr); which.min(rf2imp.testerr); trees[which.min(rf2imp.testerr)]
+min(rf3imp.testerr); which.min(rf3imp.testerr); trees[which.min(rf3imp.testerr)]
+varImp(imp.bag);varImpPlot(rfimp.p);varImpPlot(rfimp.p2);varImpPlot(rfimp.p3)
+```
+
+Bagging:
+For water.na, Sulfate and pH are the two most important variables.
+For water.imp, Sulfate and pH (by mean decrease accuracy) or Hardness and pH (by mean decrease gini)
+
+Random Forest: agrees with important variables. 
+
+
+
+6. SVM
+
+
+```{r}
+#SVM
+#need to choose kernel (and degree for polynomial), cost, gamma
+
+set.seed(448)
+#LINEAR
+#tune to find parameters
+natune.out1=tune(svm,Potability~.,data=na.train,kernel="linear",ranges=list(cost=c(0.000005, 0.000001, 0.00005, 0.00001,0.0005, 0.0001, 0.001, 0.01, 0.1, 1, 5, 10)), scale=FALSE)
+summary(natune.out1)#error: CV error rate
+bestmod.na1=natune.out1$best.model#cost= 0.000005
+summary(bestmod.na1) 
+
+imptune.out1=tune(svm,Potability~.,data=imp.train,kernel="linear",ranges=list(cost=c(0.000005, 0.000001, 0.00005, 0.00001,0.0005, 0.0001, 0.001, 0.01, 0.1, 1, 5, 10)), scale=FALSE)
+summary(imptune.out1)#error: CV error rate
+bestmod.imp1=imptune.out1$best.model 
+summary(bestmod.imp1) 
+
+#find test error with best parameter 0.000005
+na.svmfit = svm(Potability~., data=na.train, kernel="linear", cost=0.000005,scale=FALSE, decision.values=T)
+na.yhat1 = predict(na.svmfit, x.natest)
+table(na.yhat1, truth=y.natest)
+mean(na.yhat1 != y.natest) #0.4044665
+#plot(na.svmfit, na.train) #will this plot?
+
+imp.svmfit = svm(Potability~., data=imp.train, kernel="linear", cost=0.000005, scale=FALSE, decision.values=T)
+imp.yhat1 = predict(imp.svmfit, x.imptest)
+table(imp.yhat1, truth=y.imptest)
+mean(imp.yhat1 != y.imptest) #0.3643293
+
+#find test error if use 0.001?
+na.svmfitb = svm(Potability~., data=na.train, kernel="linear", cost=0.001,scale=FALSE)
+na.yhat1b = predict(na.svmfitb, x.natest)
+table(na.yhat1b, truth=y.natest)
+mean(na.yhat1b != y.natest) #0.4044665, same
+
+plot(na.svmfitb, formula = Solids~Chloramines, data=water.na)
+
+imp.svmfitb = svm(Potability~., data=imp.train, kernel="linear", cost=0.001, scale=FALSE)
+imp.yhat1b = predict(imp.svmfitb, x.imptest)
+table(imp.yhat1b, truth=y.imptest)
+mean(imp.yhat1b != y.imptest) #0.3643293, same
+
+
+#POLYNOMIAL
+#degree 2, use default gamma
+natune.out2 = tune(svm,Potability~.,data=na.train,kernel="polynomial", degree=2, ranges = list(cost=c( 0.0001, 0.01, 0.1, 1,5,10)))
+summary(natune.out2)
+bestmod.na2 = natune.out2$best.model
+summary(bestmod.na2)
+
+na.svmfit2 = svm(Potability~., data=na.train, kernel="polynomial", degree=2, cost=10, scale=FALSE, decision.values=T)
+na.yhat2 = predict(na.svmfit2, x.natest)
+table(predict=na.yhat2, truth=y.natest)
+mean(na.yhat2 != y.natest)#0.3151365
+
+imptune.out2 = tune(svm,Potability~.,data=imp.train,kernel="polynomial", degree=2, ranges=list(cost=c(0.0001, 0.01, 0.1, 1,5,10)))
+summary(imptune.out2)
+bestmod.imp2 = imptune.out2$best.model
+summary(bestmod.imp2)
+
+imp.svmfit2 = svm(Potability~., data=imp.train, kernel="polynomial", degree=2, cost=10, scale=FALSE, decision.values=T)
+imp.yhat2 = predict(imp.svmfit2, x.imptest)
+table(predict=imp.yhat2, truth=y.imptest)
+mean(imp.yhat2 != y.imptest) #0.2987805
+
+#polynomial degree 3 (default)
+natune.out3 = tune(svm,Potability~.,data=na.train,kernel="polynomial", degree=3, ranges = list(cost=c( 0.0001, 0.01, 0.1, 1,5,10)))
+summary(natune.out3)
+bestmod.na3 = natune.out3$best.model
+summary(bestmod.na3)
+
+na.svmfit3 = svm(Potability~., data=na.train, kernel="polynomial", degree=3, cost=0.1, scale=FALSE)
+na.yhat3 = predict(na.svmfit3, x.natest)
+table(predict=na.yhat3, truth=y.natest)
+mean(na.yhat3 != y.natest) #0.4044665
+
+imptune.out3 = tune(svm,Potability~.,data=imp.train,kernel="polynomial", degree=3, ranges = list(cost=c( 0.0001, 0.01, 0.1, 1,5,10)))
+summary(imptune.out3)
+bestmod.imp3 = imptune.out3$best.model
+summary(bestmod.imp3)
+
+imp.svmfit3 = svm(Potability~., data=imp.train, kernel="polynomial", degree=3, cost=1,  scale=FALSE)
+imp.yhat3 = predict(imp.svmfit3, x.imptest)
+table(predict=imp.yhat3, truth=y.imptest)
+mean(imp.yhat3 != y.imptest) #0.3460366
+
+#degree 4
+natune.out4 = tune(svm,Potability~.,data=na.train,kernel="polynomial", degree=4, ranges = list(cost=c( 0.0001, 0.01, 0.1, 1,5,10)))
+summary(natune.out4)
+bestmod.na4 = natune.out4$best.model
+summary(bestmod.na4)
+
+na.svmfit4 = svm(Potability~., data=na.train, kernel="polynomial", degree=4, cost=1, scale= FALSE, decision.values=T)
+na.yhat4 = predict(na.svmfit4, x.natest)
+table(predict=na.yhat4, truth=y.natest)
+mean(na.yhat4 != y.natest) #0.3275434
+
+imptune.out4 = tune(svm,Potability~.,data=imp.train,kernel="polynomial", degree=4, ranges = list(cost=c( 0.0001, 0.01, 0.1, 1,5,10)))
+summary(imptune.out4)
+bestmod.imp4 = imptune.out4$best.model
+summary(bestmod.imp4)
+
+imp.svmfit4 = svm(Potability~., data=imp.train, kernel="polynomial", degree=4, cost=1,  scale= FALSE, decision.values=T)
+imp.yhat4 = predict(imp.svmfit4, x.imptest)
+table(predict=imp.yhat4, truth=y.imptest)
+mean(imp.yhat4 != y.imptest) #0.3094512
+
+#RADIAL
+
+natune.outr=tune(svm, Potability~., data=na.train, kernel="radial", ranges = list(cost=c(0.01,0.1,1,10,100,1000), gamma=c(0.5,1,2,3,4)))
+summary(natune.outr)
+summary(natune.outr$best.model)
+na.svmfitr = svm(Potability~., data=na.train, kernel="radial", cost=1,  scale= FALSE, decision.values = T)
+
+imptune.outr=tune(svm, Potability~., data=imp.train, kernel="radial", ranges = list(cost=c(0.01,0.1,1,10,100,1000), gamma=c(0.5,1,2,3,4)))
+summary(imptune.outr)
+summary(imptune.outr$best.model)
+imp.svmfitr = svm(Potability~., data=imp.train, kernel="radial", cost=1,  scale= FALSE, decision.values = T)
+
+table(true=y.natest, pred = predict(natune.outr$best.model,newdata=x.natest))
+mean(predict(natune.outr$best.model,newdata=x.natest) != y.natest) #0.3573201
+
+table(true=y.imptest, pred = predict(imptune.outr$best.model,newdata=x.imptest))
+mean(predict(imptune.outr$best.model,newdata=x.imptest) != y.imptest) #0.3292683
+
+#Support Vectors & Costs:
+na.svmfitb #1301, .001
+imp.svmfitb #2083, .001
+#poly deg 2
+na.svmfit2 #1091, 10
+imp.svmfit2 #1865, 10
+#poly deg 3
+na.svmfit3 #1334, 0.1
+imp.svmfit3 #2098, 1
+#poly deg 4
+na.svmfit4 #1133, 1
+imp.svmfit4 #1811, 1
+#radial
+na.svmfitr #1248, 1
+imp.svmfitr #1997, 1
+
+
+#variable weights
+#linear
+na.svmfitb.weights = t(na.svmfitb$SV) %*% na.svmfitb$coefs
+imp.svmfitb.weights = t(imp.svmfitb$SV) %*% imp.svmfitb$coefs
+#poly deg 2
+imp.svmfit2.weights = t(imp.svmfit2$SV) %*% imp.svmfit2$coefs
+na.svmfit2.weights = t(na.svmfit2$SV) %*% na.svmfit2$coefs
+#poly deg 3
+na.svmfit3.weights = t(na.svmfit3$SV) %*% na.svmfit3$coefs
+imp.svmfit3.weights = t(imp.svmfit3$SV) %*% imp.svmfit3$coefs
+#poly deg 4
+na.svmfit4.weights = t(na.svmfit4$SV) %*% na.svmfit4$coefs
+imp.svmfit4.weights = t(imp.svmfit4$SV) %*% imp.svmfit4$coefs
+#radial
+na.svmfitr.weights = t(na.svmfitr$SV) %*% na.svmfitr$coefs
+imp.svmfitr.weights = t(imp.svmfitr$SV) %*% imp.svmfitr$coefs
+
+#include an ROC curve?
+#function:
+rocplot=function(pred, truth, ...){
+  predob = prediction(pred, truth)
+  perf = performance(predob, "tpr", "fpr")
+  plot(perf,...)}
+
+na.fitlin=attributes(predict(na.svmfitb, na.train, decision.values = TRUE))$decision.values
+na.fitlintest = attributes(predict(na.svmfitb, na.test, decision.values = TRUE))$decision.values
+
+na.fitted=attributes(predict(na.svmfit2, na.train, decision.values = TRUE))$decision.values
+natest.fitted = attributes(predict(na.svmfit2, na.test, decision.values = TRUE))$decision.values
+
+na.fitr = attributes(predict(na.svmfitr, na.train, decision.values = TRUE))$decision.values
+na.fitrtest = attributes(predict(na.svmfitr, na.test, decision.values = TRUE))$decision.values
+
+nafitpoly = attributes(predict(na.svmfit4, na.train, decision.values = TRUE))$decision.values
+nafitpolytest= attributes(predict(na.svmfit4, na.test, decision.values = TRUE))$decision.values
+
+rocplot(na.fitted,y.natrain, main="ROC: SVM Error Comparison (NA)", col="blue", lty=2)
+rocplot(natest.fitted,y.natest, add=T, col="red", lty=1)
+rocplot(na.fitlin, y.natrain, add=T, col="green", lty=2)
+rocplot(na.fitlintest, y.natest, add=T, col="purple", lty=1)
+rocplot(na.fitr, y.natrain, add=T, col="orange", lty=2)
+rocplot(na.fitrtest, y.natest, add=T, col="darkgreen", lty=1)
+rocplot(nafitpoly, y.natrain, add=T, col="turquoise", lty=2)
+rocplot(nafitpolytest, y.natest, add=T, col="red4", lty=1)
+legend("topleft", legend=c("Training - Poly(2)", "Testing - Poly(2)", "Training - Linear", "Testing - Linear", "Training - Radial", "Testing - Radial","Training - Poly(4)", "Testing - Poly(4)"), lty=c(2,1,2,1,2,1, 2, 1), col=c("blue", "red", "green", "purple", "orange", "darkgreen", "turquoise", "red4"))
+
+
+imp.fitlin=attributes(predict(imp.svmfitb, imp.train, decision.values = TRUE))$decision.values
+imp.fitlintest = attributes(predict(imp.svmfitb, imp.test, decision.values = TRUE))$decision.values
+
+imp.fitted=attributes(predict(imp.svmfit2, imp.train, decision.values = TRUE))$decision.values
+imptest.fitted = attributes(predict(imp.svmfit2, imp.test, decision.values = TRUE))$decision.values
+
+imp.fitr = attributes(predict(imp.svmfitr, imp.train, decision.values = TRUE))$decision.values
+imp.fitrtest = attributes(predict(imp.svmfitr, imp.test, decision.values = TRUE))$decision.values
+
+impfitpoly =attributes(predict(imp.svmfit4, imp.train, decision.values = TRUE))$decision.values
+impfitpolytest =  attributes(predict(imp.svmfit4, imp.test, decision.values = TRUE))$decision.values
+
+
+rocplot(imp.fitted,y.imptrain, main="ROC: SVM Error Comparison (IMP)", col="blue", lty=2)
+rocplot(imptest.fitted,y.imptest, add=T, col="red", lty=1)
+rocplot(imp.fitlin, y.imptrain, add=T, col="green", lty=2)
+rocplot(imp.fitlintest, y.imptest, add=T, col="purple", lty=1)
+rocplot(imp.fitr, y.imptrain, add=T, col="orange", lty=2)
+rocplot(imp.fitrtest, y.imptest, add=T, col="darkgreen", lty=1)
+rocplot(impfitpoly, y.imptrain, add=T, col="turquoise", lty=2)
+rocplot(impfitpolytest, y.imptest, add=T, col="red4", lty=1)
+legend("bottomright", legend=c("Training - Poly(2)", "Testing - Poly(2)", "Training - Linear", "Testing - Linear", "Training - Radial", "Testing - Radial","Training - Poly(4)", "Testing - Poly(4)"), lty=c(2,1,2,1,2,1), col=c("blue", "red", "green", "purple", "orange", "darkgreen", "turquoise", "red4"))
+
+
+
+#PLOT POLYNOMIAL DEGREE 2 FITS:
+
+plot(na.svmfit2, formula = Solids~Chloramines, data=water.na)
+plot(imp.svmfit2, formula = Solids~Organic_carbon, data=water.imp)
+```
+
+
